@@ -19,10 +19,15 @@ class Database:
             print('----------!!!!!!!!!!!!----------\n'
                   'ОШИБКА ПОДКЛЮЧЕНИЯ К БАЗЕ ДАННЫХ')
 
-
 # ДОДЕЛАТЬ
 class Field:
     def __init__(self, f_type, required=True, default=None):
+        if not isinstance(f_type, (type(int), type(str))):
+            raise ValueError("Неизвестный тип {f_type}, используйте: int, str".format(f_type=f_type))
+        if not isinstance(required, bool):
+            raise ValueError("Неверный ввод required, используйте bool: True/False")
+        if not isinstance(default, (f_type, type(None))):
+            raise ValueError("Неверный ввод default, используйте {f_type}".format(f_type=f_type))
         self.f_type = f_type
         self.required = required
         self.default = default
@@ -32,7 +37,6 @@ class Field:
             return None
         # todo exceptions
         return self.f_type(value)
-
 
 class IntField(Field):
     def __init__(self, required=True, default=None):
@@ -47,11 +51,11 @@ class IntField(Field):
             sql_format += " NOT NULL"
         return sql_format
 
-
-
 class StringField(Field):
     def __init__(self, required=True, length: int=None, default=None):
         super().__init__(str, required, default)
+        if not isinstance(length, int):
+            raise ValueError("Неверный ввод length, используйте: int")
         self.length = length
         self.sql_format = self.make_sql_field()
 
@@ -64,8 +68,6 @@ class StringField(Field):
         return sql_format
 
 
-
-# ДОДЕЛАТЬ
 class ModelMeta(type):
     def __new__(mcs, name, bases, namespace):
         if name == 'Model':
@@ -85,39 +87,87 @@ class ModelMeta(type):
         namespace['_table_name'] = meta.table_name
         return super().__new__(mcs, name, bases, namespace)
 
-
 class Manage:
-    cursor = Database.cursor
-    db = Database.db
     def __init__(self):
         self.model_cls = None
 
     def __get__(self, instance, owner):
         if self.model_cls is None:
             self.model_cls = owner
+            self.fields = owner._fields
+            self.table_name = owner._table_name
         return self
 
-    @classmethod
-    def create(cls, id, name, user_name):
-        query = "INSERT INTO users (id, name, user_name) VALUES (%s, %s, %s)"
-        values = (id, name, user_name)
-        cls.cursor.execute(query, values)
-        cls.db.commit()
+    def validate_input(self, create, kwargs):
+        for key, value in kwargs:
+            if key not in self.fields:
+                raise ValueError("Несуществующие поля таблицы")
+            else:
+                for field, settings in self.fields.items():
+                    if field == key:
+                        s = settings
+                if not isinstance(value, s.f_type):
+                    raise ValueError("Неверно указано значение {key}".format(key=key))
+        if create:
+            for field_key, field in self.fields.items():
+                if field.required and (field_key not in kwargs):
+                    raise ValueError('Указаны не все обязательные поля')
 
-    @classmethod
-    def update(cls):
-        query = "UPDATE users SET name = 'Kareem' WHERE id = 1"
+    def desc_table(self):
+        cursor = Database.cursor
+        cursor.execute("DESC {table_name}".format(table_name=self.table_name))
+        for row in cursor:
+            print(row)
 
-        ## executing the query
-        cls.cursor.execute(query)
+    def create(self, **kwargs):
+        self.validate_input(True, kwargs.items())
+        cursor = Database.cursor
+        db = Database.db
+        dict_values = list(kwargs.values())
+        for i, item in enumerate(dict_values):
+            if isinstance(item, str):
+                dict_values[i] = "'"+item+"'"
+            else:
+                dict_values[i] = str(item)
+        cursor.execute("INSERT INTO {table_name} ({fields_names}) VALUES ({fields_values})".format(
+            table_name=self.table_name,
+            fields_names=', '.join(kwargs.keys()),
+            fields_values=', '.join(dict_values)
+        ))
+        db.commit()
 
-        ## final step to tell the database that we have changed the table data
-        cls.db.commit()
+    def update(self, dict_set, dict_where):
+        self.validate_input(False, dict_set.items())
+        self.validate_input(False, dict_where.items())
+        cursor = Database.cursor
+        db = Database.db
+        update_fields = self.to_do_dict(dict_set)
+        control_fields = self.to_do_dict(dict_where)
+        cursor.execute("UPDATE {table_name} SET {update_fields} WHERE {control_fields}".format(
+            table_name=self.table_name,
+            update_fields=update_fields,
+            control_fields=control_fields
+        ))
+        db.commit()
 
-    @classmethod
-    def delete(cls, **kwargs):
+    def to_do_dict(self, dict):
+        update_fields = ""
         i = 0
-        query = "DELETE FROM users WHERE "
+        for key, value in dict.items():
+            i += 1
+            if isinstance(value, str):
+                value = "'" + value + "'"
+            update_fields = update_fields + key + " = " + str(value)
+            if i != len(dict):
+                update_fields += ", "
+        return update_fields
+
+    def delete(self, **kwargs):
+        self.validate_input(False, kwargs.items())
+        cursor = Database.cursor
+        db = Database.db
+        i = 0
+        query = "DELETE FROM {table_name} WHERE ".format(table_name=self.table_name)
         for key, value in kwargs.items():
             i += 1
             if (type(value) == str):
@@ -126,10 +176,33 @@ class Manage:
                 query += "{} = {} ". format(key, value)
             else:
                 query += "AND {} = {} ". format(key, value)
-        print(query)
-        cls.cursor.execute(query)
-        cls.db.commit()
+        cursor.execute(query)
+        db.commit()
 
+    def select(self, *args):
+        cursor = Database.cursor
+        db = Database.db
+        if len(args) == 0:
+            cursor.execute('SELECT * FROM {table_name}'.format(table_name=self.table_name))
+            for row in cursor:
+                print(row)
+        else:
+            select_fields = ""
+            i = 0
+            for key in args:
+                i += 1
+                if key not in self.fields:
+                    raise ValueError("Несуществующие поля таблицы")
+                else:
+                    select_fields += key
+                    if i != len(args):
+                        select_fields += ", "
+            cursor.execute('SELECT {select_fields} FROM {table_name}'.format(
+                select_fields=select_fields,
+                table_name=self.table_name
+            ))
+            for row in cursor:
+                print(row)
 
 class Model(metaclass=ModelMeta):
     class Meta:
